@@ -9,6 +9,7 @@ Simple Actix Web chat server with a static UI and a WebSocket endpoint.
 - Health check endpoint (`/health`)
 - Configurable host/port and allowed origins
 - Persistent history (SQLite)
+- Optional HTTP message ingest (`/message`)
 - Nginx + systemd deployment helpers
 
 ## Quick start
@@ -54,4 +55,13 @@ History is stored in SQLite at `HISTORY_DB_PATH`. On startup, the last
 
 - `GET /` UI
 - `GET /ws` WebSocket
+- `POST /message` HTTP message ingest
 - `GET /health` health check
+
+Example HTTP message:
+
+```bash
+curl -X POST http://localhost:8080/message \
+  -H "Content-Type: application/json" \
+  -d '{"user":"system","text":"offline note"}'
+```

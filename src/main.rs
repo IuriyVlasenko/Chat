@@ -157,10 +157,21 @@ impl Actor for WsSession {
 
     fn started(&mut self, ctx: &mut Self::Context) {
         let history = self.state.history.clone();
+        let storage = self.state.storage.clone();
+        let max_history = self.state.max_history;
         ctx.spawn(
             async move {
-                let guard = history.read().await;
-                guard.iter().cloned().collect::<Vec<_>>()
+                if let Some(storage) = storage {
+                    let items = tokio::task::spawn_blocking(move || storage.load_history(max_history))
+                        .await
+                        .unwrap_or_default();
+                    let mut guard = history.write().await;
+                    *guard = VecDeque::from(items.clone());
+                    items
+                } else {
+                    let guard = history.read().await;
+                    guard.iter().cloned().collect::<Vec<_>>()
+                }
             }
             .into_actor(self)
             .map(|messages, _, ctx| {
@@ -208,24 +219,19 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
                         text: inbound.text,
                         ts,
                     };
-                    {
-                        let history = self.state.history.clone();
-                        let max = self.state.max_history;
-                        let storage = self.state.storage.clone();
-                        let msg_for_history = msg.clone();
-                        actix_web::rt::spawn(async move {
-                            let mut guard = history.write().await;
-                            guard.push_back(msg_for_history.clone());
-                            while guard.len() > max {
-                                guard.pop_front();
-                            }
-                            drop(guard);
-                            if let Some(storage) = storage {
-                                storage.insert(msg_for_history);
-                            }
-                        });
-                    }
-                    let _ = self.state.tx.send(msg);
+                    let state = self.state.clone();
+                    actix_web::rt::spawn(async move {
+                        let mut guard = state.history.write().await;
+                        guard.push_back(msg.clone());
+                        while guard.len() > state.max_history {
+                            guard.pop_front();
+                        }
+                        drop(guard);
+                        if let Some(storage) = &state.storage {
+                            storage.insert(msg.clone());
+                        }
+                        let _ = state.tx.send(msg);
+                    });
                 }
             }
             Ok(ws::Message::Ping(msg)) => ctx.pong(&msg),
@@ -258,6 +264,36 @@ async fn ws_handler(
         rx: Some(rx),
     };
     ws::start(session, &req, stream)
+}
+
+async fn post_message(
+    state: web::Data<Arc<ChatState>>,
+    payload: web::Json<InboundMessage>,
+) -> HttpResponse {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let msg = ChatMessage {
+        user: payload.user.clone(),
+        text: payload.text.clone(),
+        ts,
+    };
+    let state = state.get_ref().clone();
+    actix_web::rt::spawn(async move {
+        let mut guard = state.history.write().await;
+        guard.push_back(msg.clone());
+        while guard.len() > state.max_history {
+            guard.pop_front();
+        }
+        drop(guard);
+        if let Some(storage) = &state.storage {
+            storage.insert(msg.clone());
+        }
+        let _ = state.tx.send(msg);
+    });
+
+    HttpResponse::Ok().finish()
 }
 
 #[actix_web::main]
@@ -298,6 +334,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(state.clone()))
             .app_data(web::Data::new(origins.clone()))
             .route("/ws", web::get().to(ws_handler))
+            .route("/message", web::post().to(post_message))
             .route("/health", web::get().to(|| async { HttpResponse::Ok().body("ok") }))
             .service(Files::new("/", "./static").index_file("index.html"))
     })

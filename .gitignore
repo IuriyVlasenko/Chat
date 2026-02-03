@@ -10,11 +10,5 @@ Thumbs.db
 *.db-shm
 *.db-wal
 
-/target
+/target/
 **/*.rs.bk
-
-# sqlite
-*.db
-*.db-shm
-*.db-wal
-.env
